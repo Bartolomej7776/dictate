@@ -1,0 +1,23 @@
+# Hermes Agent config.yaml snippet: a webhook route the Mac/Windows clients post voice requests to.
+# Put the secret in Hermes' .env (e.g. `openssl rand -hex 32`) and give the same value to the clients.
+# Publish the port in your Hermes container (e.g. "8644:8644", ideally bound to a private/VPN address).
+gateway:
+  platforms:
+    webhook:
+      enabled: true
+      extra:
+        host: 0.0.0.0
+        port: 8644
+        routes:
+          voice:
+            secret: ${WEBHOOK_VOICE_SECRET}
+            prompt: |-
+              [Voice request, spoken at the user's {source} and transcribed by speech-to-text, so expect small transcription mistakes.]
+              Start your reply with one line: 🎙 *"{text}"* (fix obvious transcription errors in that quote), then a blank line, then your answer.
+
+              {text}
+            deliver: telegram
+            deliver_extra:
+              chat_id: '<your Telegram chat id>'
+              thread_id: '<optional forum topic id>'
+            mirror_to_session: true

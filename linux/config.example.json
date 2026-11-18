@@ -1,0 +1,11 @@
+{
+  "server": "__SERVER__",
+  "keys": {
+    "KEY_RIGHTCTRL": {"model": "whisper-1", "language": null, "prompt": null}
+  },
+  "min_hold": 0.3,
+  "tail": 0.4,
+  "paste_combo": ["KEY_LEFTCTRL", "KEY_V"],
+  "restore_clipboard": true,
+  "beep": true
+}
