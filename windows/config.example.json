@@ -1,0 +1,10 @@
+{
+  "server": "__SERVER__",
+  "keys": {
+    "RControlKey": {"model": "whisper-1", "language": null, "prompt": null}
+  },
+  "min_hold": 0.3,
+  "tail": 0.4,
+  "restore_clipboard": true,
+  "beep": true
+}

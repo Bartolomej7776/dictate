@@ -1,0 +1,5 @@
+name: webhook_text_only
+version: 0.1.0
+description: "Webhook replies stay text even with voice.auto_tts on (webhook deliveries have no per-chat /voice off)."
+author: dictate
+hooks: []
