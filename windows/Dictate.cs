@@ -1,5 +1,6 @@
 // Push-to-talk dictation for Windows. Compiles with the .NET Framework csc (C# 5), no installs needed.
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -73,10 +74,25 @@ class Dictate : ApplicationContext
         return vk == (int)Keys.LWin || vk == (int)Keys.RWin;
     }
 
+    // Logging is queued: a file write inside the keyboard hook can stall past LowLevelHooksTimeout, and
+    // Windows then passes the swallowed Win key-up through and opens Start/Search.
+    static readonly BlockingCollection<string> logQueue = new BlockingCollection<string>();
+
     static void Log(string msg)
     {
-        try { File.AppendAllText(Path.Combine(Dir, "dictate.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + msg + "\r\n"); }
+        logQueue.Add(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + msg);
+    }
+
+    static void WriteLog(string line)
+    {
+        try { File.AppendAllText(Path.Combine(Dir, "dictate.log"), line + "\r\n"); }
         catch (IOException) { }
+    }
+
+    static void StartLogWriter()
+    {
+        new Thread(delegate () { foreach (var line in logQueue.GetConsumingEnumerable()) WriteLog(line); })
+        { IsBackground = true, Name = "log" }.Start();
     }
 
     Dictate()
@@ -106,17 +122,24 @@ class Dictate : ApplicationContext
         menu.Items.Add("Exit", null, delegate { tray.Visible = false; Application.Exit(); });
         tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Information, Text = "Dictate (hold " + string.Join("/", KeyNames()) + ")", ContextMenuStrip = menu, Visible = true };
 
-        repeatWatch = new System.Windows.Forms.Timer { Interval = 40 };
-        repeatWatch.Tick += delegate { WatchRepeats(); };
-        repeatWatch.Start();
-
         hookProc = OnKey;
-        hook = SetWindowsHookEx(WH_KEYBOARD_LL, hookProc, GetModuleHandle(null), 0);
-        // Windows silently removes a low-level hook whose callback once runs past LowLevelHooksTimeout
-        // (sleep/resume, heavy load). Input the hook never saw means it is gone: install it again.
-        var hookWatch = new System.Windows.Forms.Timer { Interval = 5000 };
-        hookWatch.Tick += delegate { WatchHook(); };
-        hookWatch.Start();
+        // The hook lives on its own high-priority thread with its own message loop, so recording,
+        // clipboard and timer work on the UI thread can never delay it. Hold state is only touched there.
+        var hookThread = new Thread(delegate ()
+        {
+            repeatWatch = new System.Windows.Forms.Timer { Interval = 40 };
+            repeatWatch.Tick += delegate { WatchRepeats(); };
+            repeatWatch.Start();
+            hook = SetWindowsHookEx(WH_KEYBOARD_LL, hookProc, GetModuleHandle(null), 0);
+            // Windows silently removes a low-level hook whose callback once runs past LowLevelHooksTimeout
+            // (sleep/resume, heavy load). Input the hook never saw means it is gone: install it again.
+            var hookWatch = new System.Windows.Forms.Timer { Interval = 5000 };
+            hookWatch.Tick += delegate { WatchHook(); };
+            hookWatch.Start();
+            Application.Run();
+        }) { IsBackground = true, Name = "hook", Priority = ThreadPriority.Highest };
+        hookThread.SetApartmentState(ApartmentState.STA);
+        hookThread.Start();
         Log("ready; server " + server + "; keys " + string.Join(",", KeyNames()));
     }
 
@@ -259,8 +282,11 @@ class Dictate : ApplicationContext
         ui.BeginInvoke(fn);
     }
 
+    IntPtr pressWindow;
+
     void Start(int vk)
     {
+        pressWindow = GetForegroundWindow();
         held = vk;
         pressedAt = DateTime.Now;
         repeating = false;
@@ -386,6 +412,15 @@ class Dictate : ApplicationContext
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+
+    static string ProcessOf(IntPtr h)
+    {
+        uint pid;
+        GetWindowThreadProcessId(h, out pid);
+        try { return Process.GetProcessById((int)pid).ProcessName; } catch (ArgumentException) { return "?"; }
+    }
+
     static string ForegroundInfo()
     {
         var h = GetForegroundWindow();
@@ -425,12 +460,21 @@ class Dictate : ApplicationContext
 
     void Paste(string text)
     {
+        // Safety net: if Start/Search grabbed focus anyway, close it and go back to where the hold began.
+        var fg = ProcessOf(GetForegroundWindow());
+        if (fg == "SearchHost" || fg == "StartMenuExperienceHost")
+        {
+            Log(fg + " has focus; closing it");
+            keybd_event(0x1B, 0x01, 0, UIntPtr.Zero);
+            keybd_event(0x1B, 0x01, 2, UIntPtr.Zero);
+            Thread.Sleep(200);
+            if (GetForegroundWindow() != pressWindow) SetForegroundWindow(pressWindow);
+            Thread.Sleep(50);
+        }
         Log("pasting into " + ForegroundInfo());
         string old = null;
         if (restoreClipboard && Clipboard.ContainsText()) old = Clipboard.GetText();
         Clipboard.SetText(text);
-        // Injected keys pass through this thread's own keyboard hook, so inject from another thread
-        // and let the hook thread keep pumping.
         ThreadPool.QueueUserWorkItem(delegate
         {
             Thread.Sleep(30);
@@ -468,9 +512,11 @@ class Dictate : ApplicationContext
         using (new Mutex(true, "Global\\dictate-ptt", out fresh))
         {
             if (!fresh) return;
+            StartLogWriter();
+            Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.AboveNormal;
             Application.EnableVisualStyles();
             try { Application.Run(new Dictate()); }
-            catch (Exception ex) { Log("fatal: " + ex); throw; }
+            catch (Exception ex) { WriteLog(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + "fatal: " + ex); throw; }
         }
     }
 }
